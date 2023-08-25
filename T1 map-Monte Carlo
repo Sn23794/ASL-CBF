@@ -1,0 +1,115 @@
+######### MONTE CARLO ##################
+import numpy as np
+import nibabel as nib
+from scipy.optimize import least_squares
+from openpyxl import load_workbook
+import openpyxl
+
+# Load the Excel file
+workbook = openpyxl.load_workbook('D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/Inversion Recovery/Folder names.xlsx')
+sheet = workbook.active
+
+# Get the maximum row count
+max_row = sheet.max_row
+for row in range(1, max_row+1):
+    # Access the cell value
+    cell_value = sheet.cell(row=row, column=1).value
+
+    # Load inversion recovery images and corresponding TI and TR values
+    IR_Sample = nib.load(
+    'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/Inversion Recovery/Q266197-2021-10066/ir0100s601a1006.nii')
+    IR_data = IR_Sample.get_fdata()
+
+    image_values = np.array([0, 1, 2, 3, 4, 5])
+    TI_values = np.array([100, 300, 500, 1000, 2000, 3000])  # Inversion times in ms
+    TR_values = np.array([2100, 2300, 2500, 3000, 4000, 5000])
+    IR_images = [nib.load(
+    f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/Inversion Recovery/Masked_IR_labelling_tube/{cell_value}/Masked_IR0{i}.nii.gz').get_fdata()
+             for i in image_values]
+
+    # Get dimensions of the inversion recovery images
+    ir_shape = IR_images[0].shape
+
+    # Define the model equation
+    def model_equation(params, TI, TR):
+        S0, T1, ne = params
+        return np.abs(S0 * (1 - 2 * ne * np.exp(-TI / T1) + np.exp(-TR / T1)))
+
+    # Define the residual function for least squares
+    def residual(params, TI, TR, voxel_data):
+        predicted = model_equation(params, TI, TR)
+        return np.abs(voxel_data - predicted)
+
+    # Set the number of Monte Carlo iterations
+    num_iterations =1000 
+
+    # Initialize arrays to store estimated T1 values from each iteration
+    t1_values = np.zeros((ir_shape[0], ir_shape[1], ir_shape[2], num_iterations))
+
+    # Iterate over each voxel in the inversion recovery images and perform Monte Carlo fit
+    for i in range(ir_shape[0]):
+        for j in range(ir_shape[1]):
+            for k in range(ir_shape[2]):
+                # Get the corresponding voxel from the inversion recovery images
+                inv_rec_voxel = np.array([image[i, j, k] for image in IR_images])
+                voxel_intensity = np.max(inv_rec_voxel)
+
+                if voxel_intensity > 0:
+                    S0_init = voxel_intensity + 0.1 * voxel_intensity
+
+                    # Ensure array size of TI and TR matches the size of voxel data
+                    TI_values_match = np.resize(TI_values, inv_rec_voxel.shape)
+                    TR_values_match = np.resize(TR_values, inv_rec_voxel.shape)
+
+                    # Compute mean and standard deviation from ROI for Monte Carlo sampling
+                    roi_mean = np.mean(inv_rec_voxel)
+                    roi_std = np.std(inv_rec_voxel)
+
+                    # Perform Monte Carlo fit
+                    for iteration in range(num_iterations):
+                        # Draw random perturbations from the normal distribution with ROI mean and std
+                        noisy_voxel_data = np.random.normal(loc=roi_mean, scale=roi_std, size=len(inv_rec_voxel))
+
+                        # Fit the model equation to the noisy data using least squares
+                        result = least_squares(residual, [S0_init, 1000, 1.0], bounds=([-10*S0_init, 0, 0], [10*S0_init, 5000, 10]),
+                                               args=(TI_values_match, TR_values_match, noisy_voxel_data))
+
+                        # Extract the estimated T1 value from the fitted parameters
+                        estimated_T1 = result.x[1]
+
+                        # Store the estimated T1 value in the t1_values array
+                        t1_values[i, j, k, iteration] = estimated_T1
+
+    # Calculate the mean T1 value over all iterations for each voxel
+    mean_t1_map = np.mean(t1_values, axis=-1)
+
+    # Convert the mean T1 map to seconds
+    mean_t1_map = mean_t1_map / 1000.0
+
+    # Save the mean T1 map as a NIfTI file
+    t1_map_image = nib.Nifti1Image(mean_t1_map, IR_Sample.affine, IR_Sample.header)
+    nib.save(t1_map_image, f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/Inversion Recovery/{cell_value}_labelling_tube_T1_map_MonteCarlo.nii.gz')
+
+    # Calculate average T1 value from the mean T1 map
+    threshold = 0
+    mask = mean_t1_map > threshold
+    signal_data = mean_t1_map[mask]
+    mean_signal = signal_data.mean()
+
+    # Open the Excel file to store mean T1 results
+    output_path = 'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/Inversion Recovery/Mean T1 Results.xlsx'
+    book = load_workbook(output_path)
+    sheet_name = 'Sheet1'  # Change the sheet name as needed
+    sheet2 = book[sheet_name]
+
+    # Find the next available row
+    next_row = sheet2.max_row + 1
+
+    # Append the mean T1 value to the next row
+    sheet2.cell(row=next_row, column=1, value=mean_signal)
+    next_row += 1
+
+    # Save the changes to the Excel file
+    book.save(output_path)
+
+workbook.close()
