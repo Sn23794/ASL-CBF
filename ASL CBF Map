@@ -1,0 +1,123 @@
+import os  # lets the user interact with the native OS Python is currently running on
+import glob
+from pathlib import Path
+import numpy as np  # numeric python
+import nibabel as nb
+from matplotlib import pyplot as plt  # matlab plotting command
+import pandas as pd
+from openpyxl import load_workbook
+import openpyxl
+
+# Load the Excel file
+workbook = openpyxl.load_workbook('D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/Folder names.xlsx')
+sheet = workbook.active
+
+# Get the maximum row count
+max_row = sheet.max_row
+for row in range(1, max_row+1):
+    # Access the cell value
+    cell_value = sheet.cell(row=row, column=1).value
+    t1= sheet.cell(row=row, column=2).value
+
+
+    image_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/*.nii'
+    mask_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Mask.nii.gz'
+#folder_name = 'Q2661197-2019-08990'
+
+    for i, filename in enumerate(glob.glob(image_path)):
+# Loading ASL and taking average of label,control and M0#
+        asl350 = nb.load(filename)
+        asl350data = asl350.get_fdata()
+        label_avg_data = (asl350data[:, :, :, 3] + asl350data[:, :, :, 5] + asl350data[:, :, :, 7]) / 3
+        control_avg_data = (asl350data[:, :, :, 2] + asl350data[:, :, :, 4] + asl350data[:, :, :, 6]) / 3
+        m0_avg_data = (asl350data[:, :, :, 0] + asl350data[:, :, :, 1]) / 2
+        # Saving the images
+        label_avg_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/label_average{i}.nii.gz'
+        control_avg_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/control_average{i}.nii.gz'
+        m0_avg_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Average_M0{i}.nii.gz'
+
+        nb.save(nb.Nifti1Image(label_avg_data, asl350.affine), label_avg_path)
+        nb.save(nb.Nifti1Image(control_avg_data, asl350.affine), control_avg_path)
+        nb.save(nb.Nifti1Image(m0_avg_data, asl350.affine), m0_avg_path)
+
+    # Calculate Delta_M #
+        delta_M_data = control_avg_data - label_avg_data
+        delta_M_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Delta_M{i}.nii.gz'
+        nb.save(nb.Nifti1Image(delta_M_data, asl350.affine), delta_M_path)
+
+    # Apply mask on M0 and Delta M image#
+        mask_image = nb.load(mask_path)
+        mask_data = mask_image.get_fdata()
+        assert m0_avg_data.shape == mask_image.shape, "Image and mask shapes do not match."
+        assert m0_avg_data.shape == delta_M_data.shape, "Image and mask shapes do not match."
+
+    # Convert mask to binary (values 0 or 1)
+        mask_data_binary = (mask_data > 0).astype(int)
+        masked_m0_data = np.multiply(m0_avg_data, mask_data)
+        masked_deltaM_data = np.multiply(delta_M_data, mask_data)
+
+    # Saving the images
+        masked_M0_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Masked_M0{i}.nii.gz'
+        nb.save(nb.Nifti1Image(masked_m0_data, asl350.affine), masked_M0_path)
+        masked_Delta_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Masked_Delta_M{i}.nii.gz'
+        nb.save(nb.Nifti1Image(masked_deltaM_data, asl350.affine), masked_Delta_path)
+
+    # Calculate Ratio Image#
+
+        def safe_image_division(image1, image2):
+            with np.errstate(divide='ignore', invalid='ignore'):
+                result = np.true_divide(image1, image2)
+                result[~np.isfinite(result)] = np.nan
+            return result
+        ratio_img_data = safe_image_division(masked_deltaM_data, masked_m0_data)
+
+        #ratio_img_data = masked_deltaM_data / masked_m0_data
+        # Saving the image
+        ratio_path = f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/Ratio_Image{i}.nii.gz'
+        nb.save(nb.Nifti1Image(ratio_img_data, asl350.affine), ratio_path)
+
+
+    # Compute voxel-wise CBF values
+        lamda = 0.32
+        label_duration = 1.8  # s
+        post_label_delay = 1.8  # s
+        label_efficiency = 0.85
+        t1_value = t1
+
+        cbf_data = np.zeros(ratio_img_data.shape)
+        for idx in np.ndindex(ratio_img_data.shape[:-1]):
+
+        # Apply CBF conversion formula
+            ratio_signal = ratio_img_data[idx]
+            cbf_value = (6000 * lamda * ratio_signal * np.exp(post_label_delay / t1_value)) / (2 * t1_value * label_efficiency * (1 - np.exp(-label_duration / t1_value)))
+
+            cbf_data[idx] = cbf_value
+
+        # Save the CBF map as a NIfTI file
+        cbf_img = nb.Nifti1Image(cbf_data, asl350.affine)
+        nb.save(cbf_img, f'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/{cell_value}/cbf_map{i}.nii.gz')
+
+        threshold = 0
+        data = cbf_img.get_fdata()
+        mask = data > threshold
+        signal_data = data[mask]
+        average_cbf = np.average(signal_data)
+        #print ("Average of CBF:", total_cbf)
+
+    # Open the Excel file
+        output_path = 'D:/Masters - Course Content/Research/DataSet/OneDrive_1_6-19-2023/PCASL_Data/Mean_CBF.xlsx'
+        book = load_workbook(output_path)
+        sheet_name = 'Sheet1'  # Change the sheet name as needed
+        sheet2 = book[sheet_name]
+
+    # Find the next available row
+        next_row = sheet2.max_row + 1
+
+    # Append the mean image data to the next row
+        sheet2.cell(row=next_row, column=1, value=average_cbf)
+        next_row += 1
+
+    # Save the changes to the Excel file
+        book.save(output_path)
+
+workbook.close()
